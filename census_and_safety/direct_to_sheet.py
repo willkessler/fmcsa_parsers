@@ -15,11 +15,11 @@ TOKEN_FILE = 'token.json'
 SPREADSHEET_ID = '1BhkkTNlR_eZwZ_uypc-Exd-E0lP0luCjhCIpShdm4yI'
 
 # File setup
-CENSUS_FILE = 'FMCSA_CENSUS1_2024Jun.txt'
-SAFETY_FILE_AB = 'SMS_AB_PassProperty_2024Jun.txt'
-SAFETY_FILE_C = 'SMS_C_PassProperty_2024Jun.txt'
-README_FILE = 'CENSUS_README.txt'
-SAFETY_README_FILE = 'SAFETY_README.txt'
+CENSUS_FILE = 'raw_data/FMCSA_CENSUS1_2024Jun.txt'
+SAFETY_FILE_AB = 'raw_data/SMS_AB_PassProperty_2024Jun.txt'
+SAFETY_FILE_C = 'raw_data/SMS_C_PassProperty_2024Jun.txt'
+README_FILE = 'raw_data/CENSUS_README.txt'
+SAFETY_README_FILE = 'raw_data/SAFETY_README.txt'
 ROWS_PER_SHEET = 10000
 MAX_COLUMN_WIDTH = 250
 EXCLUDE_FILE = 'exclude_columns.txt'
