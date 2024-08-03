@@ -1,0 +1,17 @@
+Write a python script to ingest a large csv file containing boc3
+filers data, and write the data to a google sheet using the Google
+sheets API.  The large boc3 file is called
+`boc3_allwithhistory_and_header.txt`. It has column headings in the
+first line.  Attached you'll find another script we wrote together
+that imports another data set to google sheets. We can reuse the
+client_secret.json file and the identifier for the google sheet. You
+do not need to explain how to set that up, I already have it set up
+for the other script (`direct_to_sheet.py`). For reference I've also
+attached an extract of the first 20 lines of the big csv file so you
+can see the format. Use the same rules as `direct_to_sheet.py` in
+terms of number of rows per tab, progress meter display, retries etc.
+Make sure the entries in the sheet are sorted by COMPANY_NAME so that we can see all
+of a single company's records together, for example if "Bob Smith" is a filer I'd
+like to see all their entries on a single tab. If this means that any
+filer might span two or more google sheet tabs, then move that filer
+to the next tab rather than having them split across two tabs.
