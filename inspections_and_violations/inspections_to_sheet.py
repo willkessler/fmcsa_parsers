@@ -1,6 +1,7 @@
 import csv
 import os
 import time
+import json
 import chardet
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -12,23 +13,63 @@ from googleapiclient.errors import HttpError
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
 CLIENT_SECRET_FILE = './client_secret.json'
 TOKEN_FILE = 'token.json'
-SPREADSHEET_ID = '114joL9I63ngTqpE1qXkJCCLzeqhET9G33MG7rOnU0dE'
+SPREADSHEET_ID = '117aWnAC2LGwNcjTx5nsx3RH3eR4_iHB9N3btAjL5AkM'
 
 # File setup
 INSPECTIONS_FILE = 'raw_data/2024Jun_Inspection.txt'
 README_FILE = 'raw_data/Inspection_Readme.txt'
 CENSUS_FILE = '../census_and_safety/raw_data/FMCSA_CENSUS1_2024Jun.txt'
-ROWS_PER_SHEET = 25000
+ROWS_PER_SHEET = 10000
 MAX_COLUMN_WIDTH = 250
 BATCH_SIZE = 1000
-MAX_RETRIES = 5
+MAX_RETRIES = 15
 REPORTING_STATE = 'CA'
 TAB_PREFIX='Enriched_Inspections_Data'
+
+COLUMNS_TO_COMBINE = [
+    "TIME_WEIGHT", "DRIVER_OOS_TOTAL", "VEHICLE_OOS_TOTAL", "TOTAL_HAZMAT_SENT",
+    "OOS_TOTAL", "HAZMAT_OOS_TOTAL", "HAZMAT_PLACARD_REQ", "UNIT_TYPE_DESC",
+    "UNIT_MAKE", "UNIT_LICENSE", "UNIT_LICENSE_STATE", "VIN", "UNIT_DECAL_NUMBER",
+    "UNIT_TYPE_DESC2", "UNIT_MAKE2", "UNIT_LICENSE2", "UNIT_LICENSE_STATE2", "VIN2",
+    "UNIT_DECAL_NUMBER2", "UNSAFE_INSP", "FATIGUED_INSP", "DR_FITNESS_INSP",
+    "SUBT_ALCOHOL_INSP", "VH_MAINT_INSP", "HM_INSP", "BASIC_VIOL", "UNSAFE_VIOL",
+    "FATIGUED_VIOL", "DR_FITNESS_VIOL", "SUBT_ALCOHOL_VIOL", "VH_MAINT_VIOL", "HM_VIOL"
+]
+
+PROGRESS_FILE = 'inspections_progress.json'
 
 def detect_encoding(file_path):
     with open(file_path, 'rb') as file:
         raw_data = file.read(10000)  # Read first 10000 bytes
     return chardet.detect(raw_data)['encoding']
+
+def save_progress(processed_count, sheet_counter, row_counter):
+    with open(PROGRESS_FILE, 'w') as f:
+        json.dump({
+            'processed_count': processed_count,
+            'sheet_counter': sheet_counter,
+            'row_counter': row_counter
+        }, f)
+    print(f"Progress saved: processed_count={processed_count}, sheet_counter={sheet_counter}, row_counter={row_counter}")
+
+def load_progress():
+    if os.path.exists(PROGRESS_FILE):
+        try:
+            with open(PROGRESS_FILE, 'r') as f:
+                data = f.read().strip()
+                if data:
+                    progress = json.loads(data)
+                    print(f"Loaded progress: {progress}")
+                    return progress
+                else:
+                    print("Progress file is empty. Starting from the beginning.")
+        except json.JSONDecodeError:
+            print("Error reading progress file. Starting from the beginning.")
+        except Exception as e:
+            print(f"Unexpected error reading progress file: {str(e)}. Starting from the beginning.")
+    else:
+        print("No progress file found. Starting from the beginning.")
+    return None
 
 def get_google_sheets_service():
     creds = None
@@ -158,6 +199,20 @@ def format_sheet(service, spreadsheet_id, sheet_id, num_columns, column_descript
                     "endIndex": num_columns
                 }
             }
+        },
+        {
+            "updateDimensionProperties": {
+                "range": {
+                    "sheetId": sheet_id,
+                    "dimension": "ROWS",
+                    "startIndex": 1,  # Start from the second row (index 1)
+                    "endIndex": ROWS_PER_SHEET + 1  # +1 to include the header row
+                },
+                "properties": {
+                    "pixelSize": 36  # Adjust this value to set the desired row height
+                },
+                "fields": "pixelSize"
+            }
         }
     ]
 
@@ -213,89 +268,116 @@ def format_sheet(service, spreadsheet_id, sheet_id, num_columns, column_descript
                 raise
             time.sleep(5)  # Wait 5 seconds before retrying on timeout
 
-
 def process_csv(inspections_file, census_file, service, spreadsheet_id):
-    sheet_counter = 1
-    row_counter = 0
+    progress = load_progress()
+    sheet_counter = progress['sheet_counter'] if progress else 1
+    row_counter = progress['row_counter'] if progress else 0
+    start_from = progress['processed_count'] if progress else 0
     error_count = 0
-    processed_count = 0
+    processed_count = start_from
+
+    print(f"Starting process: sheet_counter={sheet_counter}, row_counter={row_counter}, start_from={start_from}")
 
     encoding = detect_encoding(inspections_file)
     print(f"Detected encoding for inspections file: {encoding}")
 
     column_descriptions = read_column_descriptions(README_FILE, encoding)
     census_data = read_census_data(census_file)
+    sheet_ids = []
 
     with open(inspections_file, 'r', newline='', encoding=encoding, errors='replace') as csvfile:
         reader = csv.reader(csvfile)
         headers = next(reader)
+        
+        # Create index mappings
         dot_number_index = headers.index('DOT_NUMBER')
         report_state_index = headers.index('REPORT_STATE')
+        combine_indices = [headers.index(col) for col in COLUMNS_TO_COMBINE if col in headers]
+        keep_indices = [i for i in range(len(headers)) if i not in combine_indices]
+        
+        # Prepare new headers
+        new_headers = [headers[i] for i in keep_indices]
+        new_headers.append('ADDITIONAL_INFO')
         
         # Insert new columns after DOT_NUMBER
-        headers.insert(dot_number_index + 1, 'LEGAL_NAME')
-        headers.insert(dot_number_index + 2, 'TELEPHONE')
-        headers.insert(dot_number_index + 3, 'EMAIL_ADDRESS')
+        dot_number_index_new = new_headers.index('DOT_NUMBER')
+        new_headers.insert(dot_number_index_new + 1, 'LEGAL_NAME')
+        new_headers.insert(dot_number_index_new + 2, 'TELEPHONE')
+        new_headers.insert(dot_number_index_new + 3, 'EMAIL_ADDRESS')
         
-        num_columns = len(headers)
+        num_columns = len(new_headers)
 
-        print("Reading and sorting data...")
-        all_data = []
+        print("Reading and processing data...")
+        current_sheet_data = [new_headers]
+
         for row in reader:
-            if row[dot_number_index].strip():
+            processed_count += 1
+            
+            if processed_count <= start_from:
+                continue
+
+            if row[dot_number_index].strip() and row[report_state_index] == REPORTING_STATE:
+                # Combine columns
+                combined_data = "\n".join(f"{headers[i]}: {row[i]}" for i in combine_indices)
+                new_row = [row[i] for i in keep_indices] + [combined_data]
+                
+                # Add census data
                 dot_number = row[dot_number_index]
                 company_info = census_data.get(dot_number, {'LEGAL_NAME': '', 'TELEPHONE': '', 'EMAIL_ADDRESS': ''})
-                row.insert(dot_number_index + 1, company_info['LEGAL_NAME'])
-                row.insert(dot_number_index + 2, company_info['TELEPHONE'])
-                row.insert(dot_number_index + 3, company_info['EMAIL_ADDRESS'])
-                all_data.append(row)
-        
-        all_data.sort(key=lambda x: x[dot_number_index])
-        total_rows = len(all_data)
-        print(f"Total rows after filtering and enrichment: {total_rows}")
-
-        current_sheet_data = [headers]
-
-        for line_num, row in enumerate(all_data, start=1):
-            try:
-                if line_num % 1000 == 0:
-                    print(f"Processed {line_num} out of {total_rows} rows ({(line_num/total_rows)*100:.2f}%)")
-
-                if row[report_state_index] == REPORTING_STATE:
-                    current_sheet_data.append(row)
-
+                new_row.insert(dot_number_index_new + 1, company_info['LEGAL_NAME'])
+                new_row.insert(dot_number_index_new + 2, company_info['TELEPHONE'])
+                new_row.insert(dot_number_index_new + 3, company_info['EMAIL_ADDRESS'])
+                
+                current_sheet_data.append(new_row)
                 row_counter += 1
-                processed_count += 1
 
-                if row_counter == ROWS_PER_SHEET:
-                    sheet_name = f'{TAB_PREFIX}_{sheet_counter}'
-                    sheet_id = create_new_sheet(service, spreadsheet_id, sheet_name, ROWS_PER_SHEET + 1, num_columns)
-                    write_to_sheet_batch(service, spreadsheet_id, sheet_name, current_sheet_data)
-                    format_sheet(service, spreadsheet_id, sheet_id, num_columns, column_descriptions, headers)
-                    print(f"Created and populated sheet: {sheet_name}")
-                    sheet_counter += 1
-                    row_counter = 0
-                    current_sheet_data = [headers]
-                    time.sleep(2)  # Add a delay between sheets
+                if row_counter >= ROWS_PER_SHEET:
+                    print(f"Preparing to write sheet {sheet_counter} with {row_counter} rows")
+                    try:
+                        sheet_name = f'{TAB_PREFIX}_{sheet_counter}'
+                        sheet_id = create_new_sheet(service, spreadsheet_id, sheet_name, ROWS_PER_SHEET + 1, num_columns)
+                        print("Writing batch of data to google sheet.")
+                        write_to_sheet_batch(service, spreadsheet_id, sheet_name, current_sheet_data)
+                        format_sheet(service, spreadsheet_id, sheet_id, num_columns, column_descriptions, new_headers)
+                        print(f"Created and populated sheet: {sheet_name}")
+                        sheet_counter += 1
+                        row_counter = 0
+                        current_sheet_data = [new_headers]
+                        save_progress(processed_count, sheet_counter, row_counter)
+                        time.sleep(2)  # Add a delay between sheets
+                    except Exception as e:
+                        error_count += 1
+                        print(f"Error creating/writing sheet: {str(e)}")
+                        save_progress(processed_count, sheet_counter, row_counter)
+                        time.sleep(60)  # Wait for 1 minute before retrying
+                        continue
 
-            except Exception as e:
-                error_count += 1
-                print(f"Error processing line {line_num}: {str(e)}")
-                if error_count % 100 == 0:
-                    print(f"Encountered {error_count} errors. Last error: {str(e)}")
-                continue
+            if processed_count % 10000 == 0:
+                print(f"Processed {processed_count} rows, current sheet has {row_counter} rows")
+                save_progress(processed_count, sheet_counter, row_counter)
 
     # Write any remaining data
     if len(current_sheet_data) > 1:
-        sheet_name = f'{TAB_PREFIX}_{sheet_counter}'
-        sheet_id = create_new_sheet(service, spreadsheet_id, sheet_name, len(current_sheet_data), num_columns)
-        write_to_sheet_batch(service, spreadsheet_id, sheet_name, current_sheet_data)
-        format_sheet(service, spreadsheet_id, sheet_id, num_columns, column_descriptions, headers)
-        print(f"Created and populated sheet: {sheet_name}")
+        print(f"Writing final sheet with {len(current_sheet_data)} rows")
+        try:
+            sheet_name = f'{TAB_PREFIX}_{sheet_counter}'
+            sheet_id = create_new_sheet(service, spreadsheet_id, sheet_name, len(current_sheet_data), num_columns)
+            write_to_sheet_batch(service, spreadsheet_id, sheet_name, current_sheet_data)
+            format_sheet(service, spreadsheet_id, sheet_id, num_columns, column_descriptions, new_headers)
+            print(f"Created and populated final sheet: {sheet_name}")
+        except Exception as e:
+            error_count += 1
+            print(f"Error creating/writing final sheet: {str(e)}")
 
     print(f"Processing complete. {sheet_counter} sheet(s) created in the Google Spreadsheet.")
     print(f"Total rows processed: {processed_count}")
+    print(f"Total rows written: {row_counter + (sheet_counter - 1) * ROWS_PER_SHEET}")
     print(f"Total errors encountered: {error_count}")
+    
+    # Clear progress file after successful completion
+    if os.path.exists(PROGRESS_FILE):
+        os.remove(PROGRESS_FILE)
+        print("Progress file removed after successful completion.")
 
 if __name__ == "__main__":
     service = get_google_sheets_service()
