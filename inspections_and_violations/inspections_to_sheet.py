@@ -3,6 +3,8 @@ import os
 import time
 import json
 import chardet
+from datetime import datetime
+from collections import defaultdict
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -13,7 +15,7 @@ from googleapiclient.errors import HttpError
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
 CLIENT_SECRET_FILE = './client_secret.json'
 TOKEN_FILE = 'token.json'
-SPREADSHEET_ID = '117aWnAC2LGwNcjTx5nsx3RH3eR4_iHB9N3btAjL5AkM'
+SPREADSHEET_ID = '1IxH2jUFkq207AjgqJcG4zTc-CJtYyplyX1S4yuOOrOs'
 
 # File setup
 INSPECTIONS_FILE = 'raw_data/2024Jun_Inspection.txt'
@@ -25,6 +27,7 @@ BATCH_SIZE = 1000
 MAX_RETRIES = 15
 REPORTING_STATE = 'CA'
 TAB_PREFIX='Enriched_Inspections_Data'
+MAX_CELL_CHARS = 49000  # Setting a bit below 50000 to be safe
 
 COLUMNS_TO_COMBINE = [
     "TIME_WEIGHT", "DRIVER_OOS_TOTAL", "VEHICLE_OOS_TOTAL", "TOTAL_HAZMAT_SENT",
@@ -37,6 +40,27 @@ COLUMNS_TO_COMBINE = [
 ]
 
 PROGRESS_FILE = 'inspections_progress.json'
+
+def split_string(s, max_length):
+    if len(s) <= max_length:
+        return s, ""
+    return s[:max_length], s[max_length:]
+
+def safe_int(value):
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        return 0
+
+def parse_date(date_string):
+    try:
+        return datetime.strptime(date_string, '%d-%b-%y')
+    except ValueError:
+        try:
+            return datetime.strptime(date_string, '%m/%d/%Y')
+        except ValueError:
+            print(f"Unable to parse date: {date_string}")
+            return None
 
 def detect_encoding(file_path):
     with open(file_path, 'rb') as file:
@@ -118,20 +142,45 @@ def write_to_sheet_batch(service, spreadsheet_id, sheet_name, values):
         body = {
             'values': batch
         }
+
+        # Check each cell for character limit
+        for row_index, row in enumerate(batch):
+            for col_index, cell in enumerate(row):
+                if isinstance(cell, str) and len(cell) > MAX_CELL_CHARS:
+                    print(f"WARNING: Cell content exceeds {MAX_CELL_CHARS} characters at row {i + row_index + 1}, column {col_index + 1}")
+                    print(f"Cell content (truncated): {cell[:100]}...")
+                    print(f"Cell length: {len(cell)}")
+                    # Truncate the cell content
+                    batch[row_index][col_index] = cell[:MAX_CELL_CHARS]
+
         for attempt in range(MAX_RETRIES):
             try:
-                service.spreadsheets().values().update(
+                response = service.spreadsheets().values().update(
                     spreadsheetId=spreadsheet_id, range=range_name,
                     valueInputOption='RAW', body=body).execute()
+                print(f"Successfully wrote batch of {len(batch)} rows")
                 break
             except HttpError as error:
+                print(f"HTTP Error during batch write (attempt {attempt + 1}): {error}")
+                error_details = json.loads(error.content.decode('utf-8'))
+                print(f"Error details: {error_details}")
+                if 'Your input contains more than the maximum of 50000 characters in a single cell' in str(error):
+                    for row_index, row in enumerate(batch):
+                        for col_index, cell in enumerate(row):
+                            if isinstance(cell, str) and len(cell) > MAX_CELL_CHARS:
+                                print(f"Problematic cell at row {i + row_index + 1}, column {col_index + 1}")
+                                print(f"Cell content (truncated): {cell[:100]}...")
+                                print(f"Cell length: {len(cell)}")
                 if attempt == MAX_RETRIES - 1:
-                    raise
+                    print("Max retries reached. Exiting.")
+                    sys.exit(1)
                 time.sleep(2 ** attempt)  # Exponential backoff
-            except TimeoutError:
+            except Exception as e:
+                print(f"Unexpected error during batch write: {str(e)}")
                 if attempt == MAX_RETRIES - 1:
-                    raise
-                time.sleep(5)  # Wait 5 seconds before retrying on timeout
+                    print("Max retries reached. Exiting.")
+                    sys.exit(1)
+                time.sleep(5)
         time.sleep(1)  # Short delay between batches
 
 def read_column_descriptions(filename, encoding):
@@ -286,29 +335,19 @@ def process_csv(inspections_file, census_file, service, spreadsheet_id):
     sheet_ids = []
 
     with open(inspections_file, 'r', newline='', encoding=encoding, errors='replace') as csvfile:
-        reader = csv.reader(csvfile)
-        headers = next(reader)
-        
-        # Create index mappings
-        dot_number_index = headers.index('DOT_NUMBER')
-        report_state_index = headers.index('REPORT_STATE')
-        combine_indices = [headers.index(col) for col in COLUMNS_TO_COMBINE if col in headers]
-        keep_indices = [i for i in range(len(headers)) if i not in combine_indices]
+        reader = csv.DictReader(csvfile)
+        headers = reader.fieldnames
         
         # Prepare new headers
-        new_headers = [headers[i] for i in keep_indices]
-        new_headers.append('ADDITIONAL_INFO')
-        
-        # Insert new columns after DOT_NUMBER
-        dot_number_index_new = new_headers.index('DOT_NUMBER')
-        new_headers.insert(dot_number_index_new + 1, 'LEGAL_NAME')
-        new_headers.insert(dot_number_index_new + 2, 'TELEPHONE')
-        new_headers.insert(dot_number_index_new + 3, 'EMAIL_ADDRESS')
+        new_headers = [
+            'DOT_NUMBER', 'LEGAL_NAME', 'TELEPHONE', 'EMAIL_ADDRESS',
+            'REPORT_STATE', 'TOTAL_VIOLATIONS', 'ADDITIONAL_INFO', 'ADDITIONAL_INFO_CONTINUED'
+        ]
         
         num_columns = len(new_headers)
 
         print("Reading and processing data...")
-        current_sheet_data = [new_headers]
+        company_inspections = defaultdict(lambda: defaultdict(list))
 
         for row in reader:
             processed_count += 1
@@ -316,45 +355,92 @@ def process_csv(inspections_file, census_file, service, spreadsheet_id):
             if processed_count <= start_from:
                 continue
 
-            if row[dot_number_index].strip() and row[report_state_index] == REPORTING_STATE:
-                # Combine columns
-                combined_data = "\n".join(f"{headers[i]}: {row[i]}" for i in combine_indices)
-                new_row = [row[i] for i in keep_indices] + [combined_data]
-                
-                # Add census data
-                dot_number = row[dot_number_index]
-                company_info = census_data.get(dot_number, {'LEGAL_NAME': '', 'TELEPHONE': '', 'EMAIL_ADDRESS': ''})
-                new_row.insert(dot_number_index_new + 1, company_info['LEGAL_NAME'])
-                new_row.insert(dot_number_index_new + 2, company_info['TELEPHONE'])
-                new_row.insert(dot_number_index_new + 3, company_info['EMAIL_ADDRESS'])
-                
-                current_sheet_data.append(new_row)
-                row_counter += 1
+            insp_date = parse_date(row['INSP_DATE'])
+            if not insp_date or insp_date.year < 2023 or row['REPORT_STATE'] != REPORTING_STATE:
+                continue
 
-                if row_counter >= ROWS_PER_SHEET:
-                    print(f"Preparing to write sheet {sheet_counter} with {row_counter} rows")
-                    try:
-                        sheet_name = f'{TAB_PREFIX}_{sheet_counter}'
-                        sheet_id = create_new_sheet(service, spreadsheet_id, sheet_name, ROWS_PER_SHEET + 1, num_columns)
-                        print("Writing batch of data to google sheet.")
-                        write_to_sheet_batch(service, spreadsheet_id, sheet_name, current_sheet_data)
-                        format_sheet(service, spreadsheet_id, sheet_id, num_columns, column_descriptions, new_headers)
-                        print(f"Created and populated sheet: {sheet_name}")
-                        sheet_counter += 1
-                        row_counter = 0
-                        current_sheet_data = [new_headers]
-                        save_progress(processed_count, sheet_counter, row_counter)
-                        time.sleep(2)  # Add a delay between sheets
-                    except Exception as e:
-                        error_count += 1
-                        print(f"Error creating/writing sheet: {str(e)}")
-                        save_progress(processed_count, sheet_counter, row_counter)
-                        time.sleep(60)  # Wait for 1 minute before retrying
-                        continue
+            dot_number = row['DOT_NUMBER']
+            company_inspections[dot_number]['dates'].append(insp_date.strftime('%d-%b-%y'))
+            company_inspections[dot_number]['REPORT_STATE'].append(row['REPORT_STATE'])
+            
+            for field in COLUMNS_TO_COMBINE + ['BASIC_VIOL', 'UNSAFE_VIOL', 'FATIGUED_VIOL', 
+                                               'DR_FITNESS_VIOL', 'SUBT_ALCOHOL_VIOL', 'VH_MAINT_VIOL', 'HM_VIOL']:
+                if field in row:
+                    company_inspections[dot_number][field].append(row[field])
 
             if processed_count % 10000 == 0:
-                print(f"Processed {processed_count} rows, current sheet has {row_counter} rows")
+                print(f"Processed {processed_count} rows")
                 save_progress(processed_count, sheet_counter, row_counter)
+
+        print(f"Finished reading data. Total companies: {len(company_inspections)}")
+        print("Consolidating company data...")
+        current_sheet_data = [new_headers]
+
+        for dot_number, inspections in company_inspections.items():
+            company_info = census_data.get(dot_number, {'LEGAL_NAME': '', 'TELEPHONE': '', 'EMAIL_ADDRESS': ''})
+            
+            violations_total = sum(safe_int(v) for v in (
+                inspections.get('BASIC_VIOL', []) +
+                inspections.get('UNSAFE_VIOL', []) +
+                inspections.get('FATIGUED_VIOL', []) +
+                inspections.get('DR_FITNESS_VIOL', []) +
+                inspections.get('SUBT_ALCOHOL_VIOL', []) +
+                inspections.get('VH_MAINT_VIOL', []) +
+                inspections.get('HM_VIOL', [])
+            ))
+
+            additional_info = [f"Inspection Dates: {', '.join(sorted(set(inspections['dates'])))}"]
+            for field in COLUMNS_TO_COMBINE:
+                if field in inspections:
+                    values = ', '.join(set(filter(None, inspections[field])))  # Filter out empty strings
+                    if values:  # Only add non-empty fields
+                        additional_info.append(f"{field}: {values}")
+
+            additional_info_str = '\n'.join(additional_info)
+            additional_info_main, additional_info_continued = split_string(additional_info_str, MAX_CELL_CHARS)
+
+            new_row = [
+                dot_number,
+                company_info['LEGAL_NAME'],
+                company_info['TELEPHONE'],
+                company_info['EMAIL_ADDRESS'],
+                inspections['REPORT_STATE'][0] if inspections.get('REPORT_STATE') else '',
+                str(violations_total),
+                additional_info_main,
+                additional_info_continued
+            ]
+
+            # Final check for cell character limit
+            for i, cell in enumerate(new_row):
+                if isinstance(cell, str) and len(cell) > MAX_CELL_CHARS:
+                    print(f"WARNING: Cell content exceeds {MAX_CELL_CHARS} characters for DOT_NUMBER {dot_number}, column {i}")
+                    print(f"Cell content (truncated): {cell[:100]}...")
+                    print(f"Cell length: {len(cell)}")
+                    new_row[i] = cell[:MAX_CELL_CHARS]
+
+            current_sheet_data.append(new_row)
+            row_counter += 1
+
+            if row_counter >= ROWS_PER_SHEET:
+                print(f"Preparing to write sheet {sheet_counter} with {row_counter} rows")
+                try:
+                    sheet_name = f'{TAB_PREFIX}_{sheet_counter}'
+                    sheet_id = create_new_sheet(service, spreadsheet_id, sheet_name, ROWS_PER_SHEET + 1, num_columns)
+                    print("Writing batch of data to google sheet.")
+                    write_to_sheet_batch(service, spreadsheet_id, sheet_name, current_sheet_data)
+                    print(f"Created and populated sheet: {sheet_name}")
+                    sheet_ids.append(sheet_id)
+                    sheet_counter += 1
+                    row_counter = 0
+                    current_sheet_data = [new_headers]
+                    save_progress(processed_count, sheet_counter, row_counter)
+                    time.sleep(2)  # Add a delay between sheets
+                except Exception as e:
+                    error_count += 1
+                    print(f"Error creating/writing sheet: {str(e)}")
+                    save_progress(processed_count, sheet_counter, row_counter)
+                    time.sleep(60)  # Wait for 1 minute before retrying
+                    continue
 
     # Write any remaining data
     if len(current_sheet_data) > 1:
@@ -368,6 +454,10 @@ def process_csv(inspections_file, census_file, service, spreadsheet_id):
         except Exception as e:
             error_count += 1
             print(f"Error creating/writing final sheet: {str(e)}")
+
+    for sheet_id in sheet_ids:
+        print(f"Formatting columns for sheet id: {sheet_id}")
+        format_sheet(service, spreadsheet_id, sheet_id, num_columns, column_descriptions, new_headers)
 
     print(f"Processing complete. {sheet_counter} sheet(s) created in the Google Spreadsheet.")
     print(f"Total rows processed: {processed_count}")
