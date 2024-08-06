@@ -4,6 +4,10 @@ The census files can be downloaded from here:
 
 https://ai.fmcsa.dot.gov/SMS/Tools/Downloads.aspx
 
+Lists of cities in specific states can be found at:
+
+https://www.ndangira.net/cities-and-towns-in-texas/
+
 ### Setting up
 
 1. Create a GCP project.

@@ -190,6 +190,7 @@ def format_sheet(service, spreadsheet_id, sheet_id, num_columns):
     for attempt in range(MAX_RETRIES):
         try:
             service.spreadsheets().batchUpdate(spreadsheetId=spreadsheet_id, body=body).execute()
+            # Rerunning the resize doesn't seem to help it resize properly. It resizes columns to a fixed width.
             auto_resize_requests = [{
                 'autoResizeDimensions': {
                     'dimensions': {
