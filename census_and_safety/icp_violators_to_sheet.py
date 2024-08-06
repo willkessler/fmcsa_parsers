@@ -14,7 +14,7 @@ from googleapiclient.errors import HttpError
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
 CLIENT_SECRET_FILE = './client_secret.json'
 TOKEN_FILE = 'token.json'
-SPREADSHEET_ID = '1hD_vH15tufuH-ufYZFnKdfYTmET2yZLRWsIkrvcyi-s'
+SPREADSHEET_ID = '14-RAxntoOcxeEQ_s5ioSO-upmJrtSy3wFhZYGDJmCP8'
 
 # File setup
 CENSUS_FILE = 'raw_data/FMCSA_CENSUS1_2024Jun.txt'
@@ -32,14 +32,15 @@ MAX_RETRIES = 5
 def check_veh_maint(row,headers):
     authorized_for_hire_index = headers.index('AUTHORIZED_FOR_HIRE')
     nbr_power_unit_index = headers.index('NBR_POWER_UNIT')
-    veh_maint_insp_w_viol_index = headers.index('VEH_MAINT_INSP_W_VIOL')
+    # veh_maint_insp_w_viol_index = headers.index('VEH_MAINT_INSP_W_VIOL')
+    veh_oos_insp_total_index = headers.index('VEHICLE_OOS_INSP_TOTAL')
     federal_government_index = headers.index('FEDERAL_GOVERNMENT')
     state_government_index = headers.index('STATE_GOVERNMENT')
     local_government_index = headers.index('LOCAL_GOVERNMENT')
 
     try:
         nbr_power_unit = int(row[nbr_power_unit_index])
-        veh_maint_insp_w_viol = int(row[veh_maint_insp_w_viol_index])
+        veh_oos_insp_total = int(row[veh_oos_insp_total_index])
     except ValueError:
         return False  # Invalid numeric data
 
@@ -49,7 +50,7 @@ def check_veh_maint(row,headers):
         row[state_government_index] != 'Y',
         row[local_government_index] != 'Y',
         10 <= nbr_power_unit <= 50,
-        veh_maint_insp_w_viol >= 5
+        veh_oos_insp_total >= 5
     ])
 
 def detect_encoding(file_path):
@@ -373,9 +374,7 @@ def process_csv(census_file, safety_file_ab, safety_file_c, service, spreadsheet
         phy_state_index = headers.index('PHY_STATE')
         email_index = headers.index('EMAIL_ADDRESS')
         nbr_power_unit_index = filtered_headers.index('NBR_POWER_UNIT')
-        veh_maint_insp_w_viol_index = filtered_headers.index('VEH_MAINT_INSP_W_VIOL')
-        # print(f"nbr_power_unit_index: {nbr_power_unit_index}")
-        # print(f"veh_maint_insp_w_viol_index: {veh_maint_insp_w_viol_index}")
+        veh_oos_insp_total_index = filtered_headers.index('VEHICLE_OOS_INSP_TOTAL')
 
         total_rows = sum(1 for _ in reader)
         csvfile.seek(0)
@@ -409,7 +408,7 @@ def process_csv(census_file, safety_file_ab, safety_file_c, service, spreadsheet
                     filtered_row.extend([''] * len(safety_headers))
 
                 filtered_row[nbr_power_unit_index] = str(filtered_row[nbr_power_unit_index]).strip()
-                filtered_row[veh_maint_insp_w_viol_index] = str(filtered_row[veh_maint_insp_w_viol_index]).strip()
+                filtered_row[veh_oos_insp_total_index] = str(filtered_row[veh_oos_insp_total_index]).strip()
 
                 if not check_veh_maint(filtered_row, filtered_headers):
                     skipped_count += 1
