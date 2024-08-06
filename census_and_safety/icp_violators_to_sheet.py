@@ -14,7 +14,7 @@ from googleapiclient.errors import HttpError
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
 CLIENT_SECRET_FILE = './client_secret.json'
 TOKEN_FILE = 'token.json'
-SPREADSHEET_ID = '14-RAxntoOcxeEQ_s5ioSO-upmJrtSy3wFhZYGDJmCP8'
+SPREADSHEET_ID = '1Mz1IHH47zvbAa-VzJGbQhAxCeMJV6cSHjvNg6hpi0tk'
 
 # File setup
 CENSUS_FILE = 'raw_data/FMCSA_CENSUS1_2024Jun.txt'
@@ -32,7 +32,7 @@ MAX_RETRIES = 5
 def check_veh_maint(row,headers):
     authorized_for_hire_index = headers.index('AUTHORIZED_FOR_HIRE')
     nbr_power_unit_index = headers.index('NBR_POWER_UNIT')
-    # veh_maint_insp_w_viol_index = headers.index('VEH_MAINT_INSP_W_VIOL')
+    veh_maint_insp_w_viol_index = headers.index('VEH_MAINT_INSP_W_VIOL')
     veh_oos_insp_total_index = headers.index('VEHICLE_OOS_INSP_TOTAL')
     federal_government_index = headers.index('FEDERAL_GOVERNMENT')
     state_government_index = headers.index('STATE_GOVERNMENT')
@@ -40,6 +40,7 @@ def check_veh_maint(row,headers):
 
     try:
         nbr_power_unit = int(row[nbr_power_unit_index])
+        veh_maint_insp_w_viol = int(row[veh_maint_insp_w_viol_index])
         veh_oos_insp_total = int(row[veh_oos_insp_total_index])
     except ValueError:
         return False  # Invalid numeric data
@@ -50,7 +51,8 @@ def check_veh_maint(row,headers):
         row[state_government_index] != 'Y',
         row[local_government_index] != 'Y',
         10 <= nbr_power_unit <= 50,
-        veh_oos_insp_total >= 5
+        #veh_oos_insp_total >= 5
+        veh_maint_insp_w_viol >= 5
     ])
 
 def detect_encoding(file_path):
@@ -103,6 +105,12 @@ def write_to_sheet_batch(service, spreadsheet_id, sheet_name, values):
     for i in range(0, len(values), BATCH_SIZE):
         batch = values[i:i+BATCH_SIZE]
         range_name = f"{sheet_name}!A{i+1}"
+
+        # Hyperlink the USDot number to a useful page
+        for row in batch:
+            us_dot_number = row[0]
+            row[0] = f'=HYPERLINK("https://dot.report/usdot/{us_dot_number}", "{us_dot_number}")'
+
         body = {
             'values': batch
         }
@@ -110,7 +118,7 @@ def write_to_sheet_batch(service, spreadsheet_id, sheet_name, values):
             try:
                 service.spreadsheets().values().update(
                     spreadsheetId=spreadsheet_id, range=range_name,
-                    valueInputOption='RAW', body=body).execute()
+                    valueInputOption='USER_ENTERED', body=body).execute()
                 break
             except HttpError as error:
                 if attempt == MAX_RETRIES - 1:
@@ -147,34 +155,34 @@ def format_sheet(service, spreadsheet_id, sheet_id, num_columns):
                 },
                 "fields": "gridProperties.frozenRowCount"
             }
-        },
-        {
-            "autoResizeDimensions": {
-                "dimensions": {
-                    "sheetId": sheet_id,
-                    "dimension": "COLUMNS",
-                    "startIndex": 0,
-                    "endIndex": num_columns
-                }
-            }
         }
+        # {
+        #     "autoResizeDimensions": {
+        #         "dimensions": {
+        #             "sheetId": sheet_id,
+        #             "dimension": "COLUMNS",
+        #             "startIndex": 0,
+        #             "endIndex": num_columns
+        #         }
+        #     }
+        # }
     ]
 
-    for i in range(num_columns):
-        requests.append({
-            "updateDimensionProperties": {
-                "range": {
-                    "sheetId": sheet_id,
-                    "dimension": "COLUMNS",
-                    "startIndex": i,
-                    "endIndex": i + 1
-                },
-                "properties": {
-                    "pixelSize": MAX_COLUMN_WIDTH
-                },
-                "fields": "pixelSize"
-            }
-        })
+    # for i in range(num_columns):
+    #     requests.append({
+    #         "updateDimensionProperties": {
+    #             "range": {
+    #                 "sheetId": sheet_id,
+    #                 "dimension": "COLUMNS",
+    #                 "startIndex": i,
+    #                 "endIndex": i + 1
+    #             },
+    #             "properties": {
+    #                 "pixelSize": MAX_COLUMN_WIDTH
+    #             },
+    #             "fields": "pixelSize"
+    #         }
+    #     })
 
     body = {
         'requests': requests
@@ -182,6 +190,20 @@ def format_sheet(service, spreadsheet_id, sheet_id, num_columns):
     for attempt in range(MAX_RETRIES):
         try:
             service.spreadsheets().batchUpdate(spreadsheetId=spreadsheet_id, body=body).execute()
+            auto_resize_requests = [{
+                'autoResizeDimensions': {
+                    'dimensions': {
+                        'sheetId': sheet_id,
+                        'dimension': 'COLUMNS',
+                        'startIndex': 0,
+                        'endIndex': num_columns
+                    }
+                }
+            }]
+            auto_resize_body = {
+                'requests': auto_resize_requests
+            }
+            service.spreadsheets().batchUpdate(spreadsheetId=spreadsheet_id, body=auto_resize_body).execute()
             break
         except HttpError as error:
             if attempt == MAX_RETRIES - 1:
@@ -374,6 +396,7 @@ def process_csv(census_file, safety_file_ab, safety_file_c, service, spreadsheet
         phy_state_index = headers.index('PHY_STATE')
         email_index = headers.index('EMAIL_ADDRESS')
         nbr_power_unit_index = filtered_headers.index('NBR_POWER_UNIT')
+        veh_maint_insp_w_viol_index = filtered_headers.index('VEH_MAINT_INSP_W_VIOL')
         veh_oos_insp_total_index = filtered_headers.index('VEHICLE_OOS_INSP_TOTAL')
 
         total_rows = sum(1 for _ in reader)
@@ -408,6 +431,7 @@ def process_csv(census_file, safety_file_ab, safety_file_c, service, spreadsheet
                     filtered_row.extend([''] * len(safety_headers))
 
                 filtered_row[nbr_power_unit_index] = str(filtered_row[nbr_power_unit_index]).strip()
+                filtered_row[veh_maint_insp_w_viol_index] = str(filtered_row[veh_maint_insp_w_viol_index]).strip()
                 filtered_row[veh_oos_insp_total_index] = str(filtered_row[veh_oos_insp_total_index]).strip()
 
                 if not check_veh_maint(filtered_row, filtered_headers):
