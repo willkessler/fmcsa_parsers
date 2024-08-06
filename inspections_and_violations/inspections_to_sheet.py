@@ -15,7 +15,7 @@ from googleapiclient.errors import HttpError
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
 CLIENT_SECRET_FILE = './client_secret.json'
 TOKEN_FILE = 'token.json'
-SPREADSHEET_ID = '1IxH2jUFkq207AjgqJcG4zTc-CJtYyplyX1S4yuOOrOs'
+SPREADSHEET_ID = '1qxUu126efpWKG1ilyatStEkoxt27CB5laGWj7uJ1w-M'
 
 # File setup
 INSPECTIONS_FILE = 'raw_data/2024Jun_Inspection.txt'
@@ -25,7 +25,7 @@ ROWS_PER_SHEET = 10000
 MAX_COLUMN_WIDTH = 250
 BATCH_SIZE = 1000
 MAX_RETRIES = 15
-REPORTING_STATE = 'CA'
+REPORTING_STATE = 'TX'
 TAB_PREFIX='Enriched_Inspections_Data'
 MAX_CELL_CHARS = 49000  # Setting a bit below 50000 to be safe
 
@@ -135,7 +135,11 @@ def create_new_sheet(service, spreadsheet_id, sheet_name, num_rows, num_columns)
         else:
             raise
 
-def write_to_sheet_batch(service, spreadsheet_id, sheet_name, values):
+def write_to_sheet_batch(service, spreadsheet_id, sheet_name, values, 
+                         sheet_id, num_columns, column_descriptions, new_headers):
+
+    print("write_to_sheet_batch running on sheet_id {sheet_id}")
+    formatting_applied = False
     for i in range(0, len(values), BATCH_SIZE):
         batch = values[i:i+BATCH_SIZE]
         range_name = f"{sheet_name}!A{i+1}"
@@ -159,6 +163,11 @@ def write_to_sheet_batch(service, spreadsheet_id, sheet_name, values):
                     spreadsheetId=spreadsheet_id, range=range_name,
                     valueInputOption='RAW', body=body).execute()
                 print(f"Successfully wrote batch of {len(batch)} rows")
+                if not formatting_applied:
+                    print(f"Formatting sheet {sheet_id}")
+                    format_sheet(service, spreadsheet_id, sheet_id, num_columns, column_descriptions, new_headers)
+                    print(f"Done formatting sheet {sheet_id}")
+                    formatting_applied = True
                 break
             except HttpError as error:
                 print(f"HTTP Error during batch write (attempt {attempt + 1}): {error}")
@@ -239,16 +248,20 @@ def format_sheet(service, spreadsheet_id, sheet_id, num_columns, column_descript
                 "fields": "gridProperties.frozenRowCount"
             }
         },
+
+        # For some reason, auto-resize dimensions takes a very long time, maybe because the additional info
+        # column has so much data in it. So we wont' autosize those columns
         {
             "autoResizeDimensions": {
                 "dimensions": {
                     "sheetId": sheet_id,
                     "dimension": "COLUMNS",
                     "startIndex": 0,
-                    "endIndex": num_columns
+                    "endIndex": num_columns - 2
                 }
             }
         },
+
         {
             "updateDimensionProperties": {
                 "range": {
@@ -263,6 +276,7 @@ def format_sheet(service, spreadsheet_id, sheet_id, num_columns, column_descript
                 "fields": "pixelSize"
             }
         }
+
     ]
 
     for i, header in enumerate(headers):
@@ -281,6 +295,7 @@ def format_sheet(service, spreadsheet_id, sheet_id, num_columns, column_descript
             }
         })
 
+        # Put comments on the header cells explaining the meaning of each column.
         normalized_header = header.lower().replace(' ', '_')
         if normalized_header in column_descriptions:
             requests.append({
@@ -315,6 +330,7 @@ def format_sheet(service, spreadsheet_id, sheet_id, num_columns, column_descript
         except TimeoutError:
             if attempt == MAX_RETRIES - 1:
                 raise
+            print(f"Timed out during formatting. Retrying attempt {attempt}")
             time.sleep(5)  # Wait 5 seconds before retrying on timeout
 
 def process_csv(inspections_file, census_file, service, spreadsheet_id):
@@ -356,10 +372,26 @@ def process_csv(inspections_file, census_file, service, spreadsheet_id):
                 continue
 
             insp_date = parse_date(row['INSP_DATE'])
-            if not insp_date or insp_date.year < 2023 or row['REPORT_STATE'] != REPORTING_STATE:
+
+            # Limiting by date and reporting state:
+#            if not insp_date or insp_date.year < 2023 or row['REPORT_STATE'] != REPORTING_STATE:
+#                continue
+
+            # Limiting only to ones with inspections on at least one date and in the reporting state:
+            if not insp_date or row['REPORT_STATE'] != REPORTING_STATE:
                 continue
 
+            # Limiting only to those with inspection dates:
+            # if not insp_date:
+            #    continue
+
+
             dot_number = row['DOT_NUMBER']
+            company_info = census_data.get(dot_number, {'LEGAL_NAME': '', 'TELEPHONE': '', 'EMAIL_ADDRESS': ''})
+            if not company_info['EMAIL_ADDRESS']:
+                # print(f"Skipping company {company_info['LEGAL_NAME']}, tel: {company_info['TELEPHONE']}, since no email address -->{company_info['EMAIL_ADDRESS']}<--")
+                continue
+
             company_inspections[dot_number]['dates'].append(insp_date.strftime('%d-%b-%y'))
             company_inspections[dot_number]['REPORT_STATE'].append(row['REPORT_STATE'])
             
@@ -389,10 +421,10 @@ def process_csv(inspections_file, census_file, service, spreadsheet_id):
                 inspections.get('HM_VIOL', [])
             ))
 
-            additional_info = [f"Inspection Dates: {', '.join(sorted(set(inspections['dates'])))}"]
+            additional_info = [f"INSPECTION DATES: {','.join(sorted(set(inspections['dates'])))}"]
             for field in COLUMNS_TO_COMBINE:
                 if field in inspections:
-                    values = ', '.join(set(filter(None, inspections[field])))  # Filter out empty strings
+                    values = ','.join(set(filter(None, inspections[field])))  # Filter out empty strings
                     if values:  # Only add non-empty fields
                         additional_info.append(f"{field}: {values}")
 
@@ -427,7 +459,8 @@ def process_csv(inspections_file, census_file, service, spreadsheet_id):
                     sheet_name = f'{TAB_PREFIX}_{sheet_counter}'
                     sheet_id = create_new_sheet(service, spreadsheet_id, sheet_name, ROWS_PER_SHEET + 1, num_columns)
                     print("Writing batch of data to google sheet.")
-                    write_to_sheet_batch(service, spreadsheet_id, sheet_name, current_sheet_data)
+                    write_to_sheet_batch(service, spreadsheet_id, sheet_name, current_sheet_data, 
+                                         sheet_id, num_columns,column_descriptions, new_headers)
                     print(f"Created and populated sheet: {sheet_name}")
                     sheet_ids.append(sheet_id)
                     sheet_counter += 1
@@ -448,16 +481,16 @@ def process_csv(inspections_file, census_file, service, spreadsheet_id):
         try:
             sheet_name = f'{TAB_PREFIX}_{sheet_counter}'
             sheet_id = create_new_sheet(service, spreadsheet_id, sheet_name, len(current_sheet_data), num_columns)
-            write_to_sheet_batch(service, spreadsheet_id, sheet_name, current_sheet_data)
-            format_sheet(service, spreadsheet_id, sheet_id, num_columns, column_descriptions, new_headers)
+            write_to_sheet_batch(service, spreadsheet_id, sheet_name, current_sheet_data, 
+                                 sheet_id, num_columns,column_descriptions, new_headers)
             print(f"Created and populated final sheet: {sheet_name}")
         except Exception as e:
             error_count += 1
             print(f"Error creating/writing final sheet: {str(e)}")
 
-    for sheet_id in sheet_ids:
-        print(f"Formatting columns for sheet id: {sheet_id}")
-        format_sheet(service, spreadsheet_id, sheet_id, num_columns, column_descriptions, new_headers)
+#    for sheet_id in sheet_ids:
+#        print(f"Formatting columns for sheet id: {sheet_id}")
+#        format_sheet(service, spreadsheet_id, sheet_id, num_columns, column_descriptions, new_headers)
 
     print(f"Processing complete. {sheet_counter} sheet(s) created in the Google Spreadsheet.")
     print(f"Total rows processed: {processed_count}")
