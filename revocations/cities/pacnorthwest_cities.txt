@@ -1,0 +1,40 @@
+Phoenix, AZ
+Seattle, WA
+Las Vegas, NV
+Tucson, AZ
+Portland, OR
+Mesa, AZ
+Chandler, AZ
+Gilbert, AZ
+Glendale, AZ
+Scottsdale, AZ
+Henderson, NV
+Tempe, AZ
+Vancouver, WA
+Reno, NV
+Peoria, AZ
+Tacoma, WA
+North Las Vegas, NV
+Surprise, AZ
+Eugene, OR
+Salem, OR
+Spokane, WA
+Bellevue, WA
+Gresham, OR
+Hillsboro, OR
+Kent, WA
+Beaverton, OR
+Bend, OR
+Yuma, AZ
+Everett, WA
+Renton, WA
+Medford, OR
+Sparks, NV
+Avondale, AZ
+Federal Way, WA
+Goodyear, AZ
+Spokane Valley, WA
+Springfield, OR
+Flagstaff, AZ
+Yakima, WA
+Corvallis, OR
