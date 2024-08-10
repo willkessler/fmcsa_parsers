@@ -171,3 +171,4 @@ census_and_safety/cities.txt
 census_and_safety/raw_data
 boc3_filers/boc3_all*
 inspections_and_violations/raw_data
+scraping_cache

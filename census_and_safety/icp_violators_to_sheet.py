@@ -2,6 +2,8 @@ import csv
 import os
 import time
 import chardet
+import hashlib
+import requests
 from pprint import pformat
 
 # Google sheet libs
@@ -40,7 +42,7 @@ SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
 CLIENT_SECRET_FILE = './client_secret.json'
 TOKEN_FILE = 'token.json'
 SPREADSHEET_ID = '1N9FmWxa-VG-TpgWn9E8wokYFG4OXzs6pedrRoq0SpbM'
-SCRAPING_CACHE_DIR='cache/'
+SCRAPING_CACHE_DIR='scraping_cache/'
 
 # File setup
 CENSUS_FILE = 'raw_data/FMCSA_CENSUS1_2024Jun.txt'
@@ -72,7 +74,7 @@ def pretty_print_dict(d):
 def get_cached_page(url):
     """Retrieve a cached page if it exists, otherwise return None."""
     filename = hashlib.md5(url.encode()).hexdigest() + '.html'
-    filepath = os.path.join(CACHE_DIR, filename)
+    filepath = os.path.join(SCRAPING_CACHE_DIR, filename)
     if os.path.exists(filepath):
         with open(filepath, 'r', encoding='utf-8') as file:
             return file.read()
@@ -81,7 +83,7 @@ def get_cached_page(url):
 def cache_page(url, content):
     """Cache a page's content."""
     filename = hashlib.md5(url.encode()).hexdigest() + '.html'
-    filepath = os.path.join(CACHE_DIR, filename)
+    filepath = os.path.join(SCRAPING_CACHE_DIR, filename)
     with open(filepath, 'w', encoding='utf-8') as file:
         file.write(content)
 
@@ -90,23 +92,35 @@ def cache_page(url, content):
 def collect_vehicle_counts(usdot_number: str, driver):
     url = f"https://ai.fmcsa.dot.gov/SMS/Carrier/{usdot_number}/CarrierRegistration.aspx"
 
-    driver.get(url)
-    WebDriverWait(driver, 20).until(EC.presence_of_element_located((By.TAG_NAME, 'body')))
-    time.sleep(random.uniform(0.5, 1))
+    # Check if the page is cached
+    cached_content = get_cached_page(url)
+    if cached_content:
+        # print("Fetching from scraping cache.")
+        soup = BeautifulSoup(cached_content, 'html.parser')
+    else:
+        driver.get(url)
+        WebDriverWait(driver, 20).until(EC.presence_of_element_located((By.TAG_NAME, 'body')))
+        time.sleep(random.uniform(0.5, 1))
+        
+        # Cache the page content
+        page_content = driver.page_source
+        cache_page(url, page_content)
+        
+        soup = BeautifulSoup(page_content, 'html.parser')
     
-    vehicle_types = ['Straight Trucks', 'Truck Tractors', 'Trailers']
+    vehicle_types = ['Straight Trucks', 'Truck Tractors', 'Trailers','Hazmat Cargo Tank Trailers', 'Hazmat Cargo Tank Trucks']
     vehicle_counts = {vtype: 0 for vtype in vehicle_types}
 
     for vehicle_type in vehicle_types:
-        xpath = f"//th[@class='vehType'][contains(text(), '{vehicle_type}')]/following-sibling::td"
-        try:
-            elements = WebDriverWait(driver, 10).until(EC.presence_of_all_elements_located((By.XPATH, xpath)))
-            counts = [int(element.text) for element in elements]
-            total_count = sum(counts)
-            vehicle_counts[vehicle_type] = total_count
-            # print(f"{vehicle_type}: {total_count}")
-        except Exception as e:
-            print(f"Error extracting vehicle counts for {vehicle_type}: {e}")
+        elements = soup.find_all('th', class_='vehType', string=lambda text: vehicle_type in text if text else False)
+        for element in elements:
+            sibling = element.find_next_sibling('td')
+            if sibling:
+                try:
+                    count = int(sibling.text.strip())
+                    vehicle_counts[vehicle_type] += count
+                except ValueError:
+                    print(f"Error parsing count for {vehicle_type}")
 
     return vehicle_counts
 
@@ -203,7 +217,7 @@ def write_to_sheet_batch(service, spreadsheet_id, sheet_name, values):
         # Hyperlink the USDot number to a useful page
         for row in batch:
             us_dot_number = row[0]
-            row[0] = f'=HYPERLINK("https://dot.report/usdot/{us_dot_number}", "{us_dot_number}")'
+            row[0] = f'=HYPERLINK("https://ai.fmcsa.dot.gov/SMS/Carrier/{us_dot_number}/Overview.aspx", "{us_dot_number}")'
 
         body = {
             'values': batch
@@ -250,33 +264,7 @@ def format_sheet(service, spreadsheet_id, sheet_id, num_columns):
                 "fields": "gridProperties.frozenRowCount"
             }
         }
-        # {
-        #     "autoResizeDimensions": {
-        #         "dimensions": {
-        #             "sheetId": sheet_id,
-        #             "dimension": "COLUMNS",
-        #             "startIndex": 0,
-        #             "endIndex": num_columns
-        #         }
-        #     }
-        # }
     ]
-
-    # for i in range(num_columns):
-    #     requests.append({
-    #         "updateDimensionProperties": {
-    #             "range": {
-    #                 "sheetId": sheet_id,
-    #                 "dimension": "COLUMNS",
-    #                 "startIndex": i,
-    #                 "endIndex": i + 1
-    #             },
-    #             "properties": {
-    #                 "pixelSize": MAX_COLUMN_WIDTH
-    #             },
-    #             "fields": "pixelSize"
-    #         }
-    #     })
 
     body = {
         'requests': requests
@@ -445,7 +433,6 @@ def process_csv(census_file, safety_file_ab, safety_file_c, service, spreadsheet
     cities = read_cities(CITIES_FILE)
     column_descriptions_census = read_column_descriptions(README_FILE)
     column_descriptions_safety = read_column_descriptions(SAFETY_README_FILE)
-    print("Reading safety data...")
     # Check for conflicts
     conflicts = set(column_descriptions_census.keys()) & set(column_descriptions_safety.keys())
     if conflicts:
@@ -455,6 +442,7 @@ def process_csv(census_file, safety_file_ab, safety_file_c, service, spreadsheet
     # Merge the dictionaries
     column_descriptions = {**column_descriptions_census, **column_descriptions_safety}
 
+    print("Reading safety data...")
     safety_data_ab = read_safety_data(safety_file_ab)
     safety_data_c = read_safety_data(safety_file_c)
     safety_data = merge_safety_data(safety_data_ab, safety_data_c)
@@ -487,6 +475,10 @@ def process_csv(census_file, safety_file_ab, safety_file_c, service, spreadsheet
             safety_headers = list(next(iter(safety_data.values())).keys())
             filtered_headers.extend(safety_headers)
 
+        # Add vehicle count headers
+        filtered_headers.extend(['Straight Trucks', 'Truck Tractors', 'Trailers','Hazmat Cargo Tank Trailers', 'Hazmat Cargo Tank Trucks','In 8/5/2024 campaign'])
+        
+        num_columns = len(filtered_headers)
         current_sheet_data.append(filtered_headers)
         num_columns = len(filtered_headers)
 
@@ -509,10 +501,10 @@ def process_csv(census_file, safety_file_ab, safety_file_c, service, spreadsheet
 
                 dot_number = row[dot_number_index]
 
-                # Skip if the DOT number is in the excluded list
+                # Mark if the DOT number is in the excluded list
+                in_previous_campaign = 'N'
                 if dot_number in excluded_dot_numbers:
-                    skipped_count += 1
-                    continue
+                    in_previous_campaign = 'Y'
 
                 city = row[phy_city_index].strip().lower()
                 state = row[phy_state_index].strip().lower()
@@ -545,11 +537,21 @@ def process_csv(census_file, safety_file_ab, safety_file_c, service, spreadsheet
 
                 vehicle_counts = collect_vehicle_counts(dot_number, driver)
                 if not should_include_company(vehicle_counts):
-                    print(f"Company {dot_number} does not have the right fleet composition:\n{pretty_print_dict(vehicle_counts)}")
+                    # print(f"Company {dot_number} does not have the right fleet composition:\n{pretty_print_dict(vehicle_counts)}")
                     skipped_count += 1
                     continue
-                else:
-                    print(f"Company {dot_number} has the right fleet composition:\n{pretty_print_dict(vehicle_counts)}")
+                # else:
+                    # print(f"Company {dot_number} has the right fleet composition:\n{pretty_print_dict(vehicle_counts)}")
+
+                # Add vehicle counts to the filtered row
+                filtered_row.extend([
+                    str(vehicle_counts['Straight Trucks']),
+                    str(vehicle_counts['Truck Tractors']),
+                    str(vehicle_counts['Trailers']),
+                    str(vehicle_counts['Hazmat Cargo Tank Trailers']),
+                    str(vehicle_counts['Hazmat Cargo Tank Trucks']),
+                    in_previous_campaign
+                ])
 
                 current_sheet_data.append(filtered_row)
                 row_counter += 1
@@ -558,10 +560,11 @@ def process_csv(census_file, safety_file_ab, safety_file_c, service, spreadsheet
 
                 if row_counter == ROWS_PER_SHEET:
                     sheet_name = f'Merged_Data_{sheet_counter}'
+                    print(f"Creating non-final sheet: {sheet_name}")
                     sheet_id = create_new_sheet(service, spreadsheet_id, sheet_name, ROWS_PER_SHEET + 1, num_columns)
                     write_to_sheet_batch(service, spreadsheet_id, sheet_name, current_sheet_data)
                     format_sheet(service, spreadsheet_id, sheet_id, num_columns, column_descriptions, filtered_headers)
-                    print(f"Created and populated sheet: {sheet_name}")
+                    print(f"Created and populated non-final sheet: {sheet_name}")
                     sheet_counter += 1
                     row_counter = 0
                     current_sheet_data = [filtered_headers]
@@ -577,10 +580,11 @@ def process_csv(census_file, safety_file_ab, safety_file_c, service, spreadsheet
     # Write any remaining data
     if row_counter > 0:
         sheet_name = f'Merged_Data_{sheet_counter}'
+        print(f"Creating final sheet: {sheet_name}")
         sheet_id = create_new_sheet(service, spreadsheet_id, sheet_name, row_counter + 1, num_columns)
         write_to_sheet_batch(service, spreadsheet_id, sheet_name, current_sheet_data)
         format_sheet(service, spreadsheet_id, sheet_id, num_columns, column_descriptions, filtered_headers)
-        print(f"Created and populated sheet: {sheet_name}")
+        print(f"Created and populated final sheet: {sheet_name}")
 
     print(f"Processing complete. {sheet_counter} sheet(s) created in the Google Spreadsheet.")
     print(f"Total rows in input file: {total_rows}")
