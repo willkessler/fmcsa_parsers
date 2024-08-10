@@ -2,25 +2,52 @@ import csv
 import os
 import time
 import chardet
+from pprint import pformat
+
+# Google sheet libs
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
-# This script will try to filter down to companies with 10-50 power units, not government entities, with more violations
+# Scraping libs
+import random
+import pandas as pd
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException, NoSuchElementException
+from webdriver_manager.chrome import ChromeDriverManager
+from bs4 import BeautifulSoup
+from urllib.parse import urlparse, unquote, quote_plus, urlencode
+
+# This script will try to filter down to companies with 10-50 power units, not government entities, with > 5 OOS or violations. It will only include
+# companies with truck tractors or trailers.
+
+# Set up Chrome options
+chrome_options = Options()
+chrome_options.add_argument("--headless")  # Run in headless mode
+
+# Set up WebDriver using webdriver_manager. We use scraping the FMCSA to get vehicle counts
+driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
 
 # Google Sheets API setup
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
 CLIENT_SECRET_FILE = './client_secret.json'
 TOKEN_FILE = 'token.json'
-SPREADSHEET_ID = '1Mz1IHH47zvbAa-VzJGbQhAxCeMJV6cSHjvNg6hpi0tk'
+SPREADSHEET_ID = '1N9FmWxa-VG-TpgWn9E8wokYFG4OXzs6pedrRoq0SpbM'
+SCRAPING_CACHE_DIR='cache/'
 
 # File setup
 CENSUS_FILE = 'raw_data/FMCSA_CENSUS1_2024Jun.txt'
 SAFETY_FILE_AB = 'raw_data/SMS_AB_PassProperty_2024Jun.txt'
 SAFETY_FILE_C = 'raw_data/SMS_C_PassProperty_2024Jun.txt'
 README_FILE = 'raw_data/CENSUS_README.txt'
+EXCLUDED_DOT_NUMBERS_FILE = 'raw_data/excluded_dotnumbers.txt'
 SAFETY_README_FILE = 'raw_data/SAFETY_README.txt'
 ROWS_PER_SHEET = 50000
 MAX_COLUMN_WIDTH = 250
@@ -28,6 +55,74 @@ EXCLUDE_FILE = 'exclude_columns.txt'
 CITIES_FILE = 'cities.txt'
 BATCH_SIZE = 1000
 MAX_RETRIES = 5
+
+# Ensure the scraping cache directory exists
+os.makedirs(SCRAPING_CACHE_DIR, exist_ok=True)
+
+def read_excluded_dot_numbers(filename):
+    excluded_dot_numbers = set()
+    with open(filename, 'r') as file:
+        for line in file:
+            excluded_dot_numbers.add(line.strip())
+    return excluded_dot_numbers
+
+def pretty_print_dict(d):
+    return pformat(d, indent=4)
+
+def get_cached_page(url):
+    """Retrieve a cached page if it exists, otherwise return None."""
+    filename = hashlib.md5(url.encode()).hexdigest() + '.html'
+    filepath = os.path.join(CACHE_DIR, filename)
+    if os.path.exists(filepath):
+        with open(filepath, 'r', encoding='utf-8') as file:
+            return file.read()
+    return None
+
+def cache_page(url, content):
+    """Cache a page's content."""
+    filename = hashlib.md5(url.encode()).hexdigest() + '.html'
+    filepath = os.path.join(CACHE_DIR, filename)
+    with open(filepath, 'w', encoding='utf-8') as file:
+        file.write(content)
+
+# Get the FMCSA data for truck tractor and trailer counts (not straight trucks e.g. box trucks).
+# This data is unfortunately not available in the QC Api, but can be scraped from SAFER pages.
+def collect_vehicle_counts(usdot_number: str, driver):
+    url = f"https://ai.fmcsa.dot.gov/SMS/Carrier/{usdot_number}/CarrierRegistration.aspx"
+
+    driver.get(url)
+    WebDriverWait(driver, 20).until(EC.presence_of_element_located((By.TAG_NAME, 'body')))
+    time.sleep(random.uniform(0.5, 1))
+    
+    vehicle_types = ['Straight Trucks', 'Truck Tractors', 'Trailers']
+    vehicle_counts = {vtype: 0 for vtype in vehicle_types}
+
+    for vehicle_type in vehicle_types:
+        xpath = f"//th[@class='vehType'][contains(text(), '{vehicle_type}')]/following-sibling::td"
+        try:
+            elements = WebDriverWait(driver, 10).until(EC.presence_of_all_elements_located((By.XPATH, xpath)))
+            counts = [int(element.text) for element in elements]
+            total_count = sum(counts)
+            vehicle_counts[vehicle_type] = total_count
+            # print(f"{vehicle_type}: {total_count}")
+        except Exception as e:
+            print(f"Error extracting vehicle counts for {vehicle_type}: {e}")
+
+    return vehicle_counts
+
+def should_include_company(vehicle_counts, min_threshold=5):
+    """
+    Determine whether to include the company based on the number of truck tractors or trailers.
+    
+    Args:
+    vehicle_counts (dict): Total number of straight trucks, truck tractors, and trailers
+    min_threshold (int): Minimum number of truck tractors or trailers required (default is 5)
+    
+    Returns:
+    bool: True if the company should be included, False otherwise
+    """
+    return vehicle_counts['Truck Tractors'] > min_threshold or vehicle_counts['Trailers'] > min_threshold
+
 
 def check_veh_maint(row,headers):
     authorized_for_hire_index = headers.index('AUTHORIZED_FOR_HIRE')
@@ -51,8 +146,7 @@ def check_veh_maint(row,headers):
         row[state_government_index] != 'Y',
         row[local_government_index] != 'Y',
         10 <= nbr_power_unit <= 50,
-        #veh_oos_insp_total >= 5
-        veh_maint_insp_w_viol >= 5
+        (veh_oos_insp_total >= 5 or veh_maint_insp_w_viol >= 5) # Focus on oos truck counts, AND/OR maintenance violations
     ])
 
 def detect_encoding(file_path):
@@ -377,6 +471,10 @@ def process_csv(census_file, safety_file_ab, safety_file_c, service, spreadsheet
     encoding = detect_encoding(census_file)
     print(f"Detected encoding for census file: {encoding}")
 
+    # Read excluded DOT numbers from previous reach-out efforts
+    excluded_dot_numbers = read_excluded_dot_numbers(EXCLUDED_DOT_NUMBERS_FILE)
+    print(f"Loaded {len(excluded_dot_numbers)} excluded DOT numbers.")
+
     with open(census_file, 'r', encoding=encoding, errors='replace') as csvfile:
         reader = csv.reader(csvfile)
         headers = next(reader)
@@ -409,6 +507,13 @@ def process_csv(census_file, safety_file_ab, safety_file_c, service, spreadsheet
                 if line_num % 1000 == 0:
                     print(f"Processed {line_num} out of {total_rows} rows ({(line_num/total_rows)*100:.2f}%)")
 
+                dot_number = row[dot_number_index]
+
+                # Skip if the DOT number is in the excluded list
+                if dot_number in excluded_dot_numbers:
+                    skipped_count += 1
+                    continue
+
                 city = row[phy_city_index].strip().lower()
                 state = row[phy_state_index].strip().lower()
 
@@ -425,7 +530,6 @@ def process_csv(census_file, safety_file_ab, safety_file_c, service, spreadsheet
                 filtered_row = [row[i] for i in include_indices]
 
                 # Add safety data
-                dot_number = row[dot_number_index]
                 if dot_number in safety_data:
                     filtered_row.extend(safety_data[dot_number].values())
                 else:
@@ -438,6 +542,14 @@ def process_csv(census_file, safety_file_ab, safety_file_c, service, spreadsheet
                 if not check_veh_maint(filtered_row, filtered_headers):
                     skipped_count += 1
                     continue
+
+                vehicle_counts = collect_vehicle_counts(dot_number, driver)
+                if not should_include_company(vehicle_counts):
+                    print(f"Company {dot_number} does not have the right fleet composition:\n{pretty_print_dict(vehicle_counts)}")
+                    skipped_count += 1
+                    continue
+                else:
+                    print(f"Company {dot_number} has the right fleet composition:\n{pretty_print_dict(vehicle_counts)}")
 
                 current_sheet_data.append(filtered_row)
                 row_counter += 1
@@ -479,4 +591,9 @@ def process_csv(census_file, safety_file_ab, safety_file_c, service, spreadsheet
 
 if __name__ == "__main__":
     service = get_google_sheets_service()
-    process_csv(CENSUS_FILE, SAFETY_FILE_AB, SAFETY_FILE_C, service, SPREADSHEET_ID)
+    try:
+        process_csv(CENSUS_FILE, SAFETY_FILE_AB, SAFETY_FILE_C, service, SPREADSHEET_ID)
+    except Exception as e:
+        print(f"Error running process_csv: {e}")
+    finally:
+        driver.quit()
