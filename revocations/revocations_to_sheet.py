@@ -259,10 +259,6 @@ def read_column_descriptions(filename, encoding):
                     descriptions[column_name] = description
     return descriptions
 
-import requests
-from bs4 import BeautifulSoup
-import time
-
 def extract_company_data(usdot, max_retries=3):
     url = f"https://safer.fmcsa.dot.gov/query.asp?searchtype=ANY&query_type=queryCarrierSnapshot&query_param=USDOT&query_string={usdot}"
     
@@ -474,8 +470,8 @@ def process_csv(revocations_file, service, spreadsheet_id):
     num_columns = len(new_headers)
 
     extraction_counter = {}  # New counter
-    total_companies = len(company_revocations)
     processed_companies = 0
+    total_companies = len(company_revocations)
 
     filtered_companies = {}
 
@@ -488,6 +484,13 @@ def process_csv(revocations_file, service, spreadsheet_id):
             extraction_counter[dot_number] = extraction_counter.get(dot_number, 0) + 1
             
             company_data = extract_company_data(dot_number)
+
+            processed_companies += 1
+            time.sleep(random.uniform(1, 3))
+            if processed_companies % 100 == 0:
+                print("Waiting one minute to avoid bot detector")
+                time.sleep(100)
+
             if company_data.get('Legal Name') == 'N/A':
                 # print(f"      *** Skipping not-located usdot : {dot_number}")
                 continue
@@ -511,6 +514,7 @@ def process_csv(revocations_file, service, spreadsheet_id):
     print("Processing filtered companies and writing to sheets...")
 
     current_sheet_data = [new_headers]
+    processed_companies = 0
 
     with tqdm(total=len(filtered_companies), desc="Processing filtered companies", unit="company") as pbar:
         for dot_number, (company_data, revocations) in filtered_companies.items():
@@ -537,6 +541,9 @@ def process_csv(revocations_file, service, spreadsheet_id):
                     docket_numbers.add(revocation['DOCKET_NUMBER'])
 
             dot_url = f"https://safer.fmcsa.dot.gov/query.asp?searchtype=ANY&query_type=queryCarrierSnapshot&query_param=USDOT&query_string={dot_number}"
+
+            address = company_data.get('Physical Address', '')
+            city, state = extract_city_state(address)
 
             new_row = [
                 f'=HYPERLINK("{dot_url}", "{dot_number}")',
@@ -583,7 +590,7 @@ def process_csv(revocations_file, service, spreadsheet_id):
             pbar.set_postfix({"Processed": processed_companies, "Remaining": total_companies - processed_companies})
 
             # Add a delay between requests to avoid overwhelming the server
-            time.sleep(1)
+            # time.sleep(random.uniform(1, 3))
 
         # At the end of the function, print any DOT numbers that were extracted more than once
         multiple_extractions = {dot: count for dot, count in extraction_counter.items() if count > 1}
