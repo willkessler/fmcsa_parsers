@@ -23,6 +23,8 @@ https://www.ndangira.net/cities-and-towns-in-texas/
 
 ### Running the script
 
+*** REMEMBER that `token.json` may have expired. Delete this file so you can re-oauth with google.***
+
 ``` python
 clear && python3 direct_to_sheet.py
 ```
