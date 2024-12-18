@@ -41,16 +41,16 @@ driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), opti
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
 CLIENT_SECRET_FILE = './client_secret.json'
 TOKEN_FILE = 'token.json'
-SPREADSHEET_ID = '1N9FmWxa-VG-TpgWn9E8wokYFG4OXzs6pedrRoq0SpbM'
+SPREADSHEET_ID = '1hdza5Q5G8xfiTtqGXjEMHgh-mcg_yjlt8-45XT6V89E';
 SCRAPING_CACHE_DIR='scraping_cache/'
 
 # File setup
-CENSUS_FILE = 'raw_data/FMCSA_CENSUS1_2024Jun.txt'
-SAFETY_FILE_AB = 'raw_data/SMS_AB_PassProperty_2024Jun.txt'
-SAFETY_FILE_C = 'raw_data/SMS_C_PassProperty_2024Jun.txt'
-README_FILE = 'raw_data/CENSUS_README.txt'
+CENSUS_FILE = 'raw_data/FMCSA_CENSUS1_2024Nov.txt'
+SAFETY_FILE_AB = 'raw_data/SMS_AB_PassProperty_2024Nov.txt'
+SAFETY_FILE_C = 'raw_data/SMS_C_PassProperty_2024Nov.txt'
+README_FILE = 'raw_data/READMEs/CENSUS_README.txt'
 EXCLUDED_DOT_NUMBERS_FILE = 'raw_data/excluded_dotnumbers.txt'
-SAFETY_README_FILE = 'raw_data/SAFETY_README.txt'
+SAFETY_README_FILE = 'raw_data/READMEs/SAFETY_README.txt'
 ROWS_PER_SHEET = 50000
 MAX_COLUMN_WIDTH = 250
 EXCLUDE_FILE = 'exclude_columns.txt'

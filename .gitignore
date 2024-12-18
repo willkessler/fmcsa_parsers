@@ -165,7 +165,7 @@ cython_debug/
 *~
 
 # Repo-specific
-client_secret.json
+client_secret.json*
 token.json
 census_and_safety/cities.txt
 census_and_safety/raw_data
